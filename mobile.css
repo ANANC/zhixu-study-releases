@@ -119,3 +119,5 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",s
 @media(max-width:390px){.topcontrols{gap:4px}.topcontrols .quick-ai{width:105px}.topcopy{min-width:120px}.topcontrols .btn.small{padding:7px;font-size:11px}.brand{font-size:16px}.mobile-nav{max-width:160px}.main{padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right))}}
 @media(max-height:520px) and (max-width:720px){.side{min-height:44px;padding-top:3px;padding-bottom:3px}.top{padding-bottom:6px}.topcopy .sub{display:none}.web-cloud-summary{display:none}.main{gap:7px;padding-top:6px}.compose textarea{max-height:90px}.composefoot{margin-top:0}.compose{padding-top:7px;padding-bottom:6px}.mobile-nav{min-height:38px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+
+.web-storage-blocked{position:fixed;inset:0;background:#f5f6fa;z-index:1000;height:100dvh}

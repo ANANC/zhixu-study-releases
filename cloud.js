@@ -4,7 +4,7 @@ let cloudChanging=false;
 let workspaceCloud={phase:'unbound',connected:false,autoSync:false};
 function cloudTime(at){return at?new Date(at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'尚未保存';}
 function workspaceCloudLabel(){if(!desktop)return '云端：桌面版提供同步';return {unbound:'有道数据空间未连接',pending:workspaceCloud.error?'云端待重试 · 本机已保留':'正在等待保存到有道',syncing:'正在保存到有道',synced:'有道已保存 · '+cloudTime(workspaceCloud.lastSyncedAt),conflict:'有道与本机版本待选择',error:'有道连接失败 · 本机已保留'}[workspaceCloud.phase]||'有道数据待同步';}
-function cloudCount(value){return `${value?.courses||0} 个学习会话、${value?.notes||0} 篇笔记`;}
+function cloudCount(value){return `${value?.courses||0} 个学习会话、${value?.notes||0} 篇笔记、${value?.reading||0} 项语境词汇`;}
 function cloudStatusHTML(){return `<span class="cloud-dot ${workspaceCloud.phase==='synced'?'saved':''}"></span>${esc(workspaceCloudLabel())}`;}
 function refreshCloudLabel(){const n=document.getElementById('workspace-cloud-state');if(n)n.innerHTML=cloudStatusHTML();const m=document.getElementById('cloud-status-detail');if(m)m.textContent=workspaceCloudLabel();}
 const cloudRender=render;

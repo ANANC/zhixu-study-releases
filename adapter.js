@@ -13,6 +13,7 @@
   store=await new BrowserStore().init();window.__browserStore=store;
   ai=new BrowserAI(store);youdao=new WebYoudao(store);cloud=new WebCloud(store,youdao,emit);
   StudyModules.require('./adaptive.cjs').registerAdaptive((name,fn)=>{methods[name]=fn;},ai,store);
+  StudyModules.require('./reading.cjs').registerReading((name,fn)=>{methods[name]=fn;},ai);
   cloud.schedule();return store;
  })();
  // Avoid stale legacy preview data during account changes.
@@ -46,9 +47,11 @@
  methods.acceptRemote=async id=>{const meta=store.data.sync.notes[id],note=store.data.workspace?.notes.find(n=>n.id===id);if(!meta?.cloudId||!note)throw Error('冲突笔记不存在');if(!(await youdao.list(store.data.config.youdao.folderId)).some(x=>x.id===meta.cloudId))throw Error('笔记不属于授权目录');await store.backupLocal(store.backup(),'before-note-restore');note.text=await youdao.read(meta.cloudId);note.cloudBodyOverride=note.text;note.at=Date.now();await store.commit();return store.data.workspace;};
  function download(name,content,type='application/json'){const url=URL.createObjectURL(new Blob([content],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);return true;}
  methods.exportBackup=()=>download('知序学习备份.json',JSON.stringify(store.backup(),null,2));
+ methods.localBackupList=async()=> (await store.localBackups()).map(x=>({id:x.id,at:x.at,reason:x.reason,counts:{sessions:Object.keys(x.backup.workspace?.sessions||{}).length,notes:x.backup.workspace?.notes?.length||0,reading:x.backup.workspace?.reading?.items?.length||0}}));
+ methods.localBackupPreview=async id=>{const row=(await store.localBackups()).find(x=>x.id===id);if(!row?.backup?.workspace)throw Error('恢复前备份为空或已不存在');pendingImport=StudyModules.require('./workspace.cjs').importBackup(row.backup);return StudyModules.require('./workspace.cjs').preview(store.data.workspace,pendingImport);};
  methods.exportNote=id=>{const note=store.data.workspace?.notes.find(n=>n.id===id);if(!note)throw Error('笔记不存在');return download(note.title.replace(/[<>:"/\\|?*]/g,'-')+'.md','# '+note.title+'\n\n'+note.text,'text/markdown');};
  function chooseFile(accept){return new Promise(resolve=>{const el=document.createElement('input');el.type='file';el.accept=accept;el.onchange=()=>{const f=el.files?.[0];el.remove();resolve(f||null);};el.oncancel=()=>{el.remove();resolve(null);};document.body.appendChild(el);el.hidden=true;el.click();});}
- methods.importPreview=async()=>{const file=await chooseFile('.json');if(!file)return null;if(file.size>12000000)throw Error('备份超过 12MB');pendingImport=StudyModules.require('./workspace.cjs').importBackup(JSON.parse(await file.text()));return StudyModules.require('./workspace.cjs').preview(store.data.workspace,pendingImport);};
+ methods.importPreview=async selectedFile=>{const file=selectedFile||await chooseFile('.json');if(!file)return null;if(file.size>12000000)throw Error('备份超过 12MB');pendingImport=StudyModules.require('./workspace.cjs').importBackup(JSON.parse(await file.text()));return StudyModules.require('./workspace.cjs').preview(store.data.workspace,pendingImport);};
  methods.importApply=async()=>{if(!pendingImport)throw Error('请先预览备份');await store.backupLocal(store.backup(),'before-restore');await store.setWorkspace(pendingImport);pendingImport=null;store.data.sync.notes={};await store.commit();cloud.schedule();return store.data.workspace;};
  methods.snapshotUpload=async()=>{if(!store.data.workspace)throw Error('尚无学习数据');const backup=store.backup(),content='# 知序学习数据快照\n\n```json\n'+JSON.stringify(backup).replace(/`/g,'\\u0060')+'\n```';const id=await youdao.create('知序数据快照 · '+new Date().toISOString().replace(/[:.]/g,'-')+' · '+store.data.deviceId+'.md',content);const remote=await youdao.read(id);if(StudyModules.require('./cloud.cjs').digest(JSON.parse(remote.match(/```json\s*([\s\S]*?)\s*```/)?.[1]||'null'))!==StudyModules.require('./cloud.cjs').digest(backup))throw Error('快照回读不一致，未标记成功');store.data.sync.lastSnapshot={id,at:Date.now()};await store.commit();return {id};};
  methods.snapshotList=async()=>{const rows=await youdao.list(store.data.config.youdao.folderId);return rows.filter(x=>!x.directory&&(x.title.startsWith('知序数据快照 · ')||x.title.startsWith('知序学习版本 · '))).sort((a,b)=>b.title.localeCompare(a.title));};
@@ -73,8 +76,9 @@
   try{return {config:store.publicConfig(),...(await cloud.connect())};}catch(error){return {config:store.publicConfig(),cloud:cloud.status(),authorizationImported:true,connectionError:error.message};}
  };
  const bridge={isWeb:true,onEvent(fn){listeners.add(fn);return ()=>listeners.delete(fn);},ready};
- for(const name of Object.keys(methods).concat(['designAdaptiveDiagnosis','designAdaptiveLoop']))bridge[name]=async(...args)=>{await ready;return methods[name](...args);};
+ for(const name of Object.keys(methods).concat(['designAdaptiveDiagnosis','designAdaptiveLoop','explainReadingTerm']))bridge[name]=async(...args)=>{await ready;return methods[name](...args);};
  bridge.chooseAuthorizationFile=()=>chooseFile('.json');
+ bridge.chooseBackupFile=()=>chooseFile('.json');
  window.study=bridge;
  
  
