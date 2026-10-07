@@ -1,8 +1,8 @@
 (function(global){
   'use strict';
 
-  // Uses the same authorized official service as the desktop CLI. Credentials
-  // belong to this browser's store and are sent only in request headers.
+  // Canonical MCP client used by both the desktop application and the browser.
+  // Credentials belong to the device store and are sent only in headers.
   const SERVER='https://open.mail.163.com/api/ynote/mcp/sse';
   const SERVER_ORIGIN=new URL(SERVER).origin;
   const MAX_BYTES=12*1024*1024;
@@ -22,13 +22,29 @@
     return failure('有道请求未完成（HTTP '+status+'），学习内容仍保留在本机。',false,write);
   }
   function parsedResult(raw){
-    if(raw?.isError)throw failure('有道未接受这次操作，请检查授权、目录和笔记后重试。');
     const texts=(raw?.content||[]).filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text);
     let data=raw?.structuredContent;
     if(typeof data==='string'){try{data=JSON.parse(data);}catch{data=null;}}
     if(!data||typeof data!=='object'){
       data=null;
       for(const value of texts){try{const decoded=JSON.parse(value);if(decoded&&typeof decoded==='object'){data=decoded;break;}}catch{}}
+    }
+    const codeValue=data?.errorCode??data?.errCode??data?.code??data?.error?.code;
+    const numericCode=(typeof codeValue==='number'&&Number.isFinite(codeValue))||(typeof codeValue==='string'&&/^-?\d{1,10}$/.test(codeValue))?Number(codeValue):null;
+    const clearCodeFailure=numericCode!==null&&!([0,200,201,202,204].includes(numericCode));
+    const clearStatusFailure=typeof data?.status==='string'&&/^(?:error|failed|failure|denied|forbidden)$/i.test(data.status);
+    const clearNamedCodeFailure=typeof codeValue==='string'&&/(?:^|[_-])(?:error|failed|failure|denied|forbidden)(?:$|[_-])/i.test(codeValue);
+    const literalFailure=raw?.structuredContent===false||texts.some(value=>value.trim()==='false');
+    const explicitError=typeof data?.error==='string'&&!!data.error.trim()||data?.error&&typeof data.error==='object'&&Object.keys(data.error).length>0;
+    const failed=raw?.isError||literalFailure||data?.success===false||data?.ok===false||data?.result===false||data?.data===false||data?.status===false||clearCodeFailure||clearNamedCodeFailure||clearStatusFailure||explicitError;
+    if(failed){
+      // Do not echo a server's original error text: it can include submitted
+      // note content or credentials. Expose only a safe code or known category.
+      const errorText=texts.join('\n')+'\n'+String(data?.message||data?.error||'');let message='有道未接受这次操作，请检查授权、目录和笔记后重试。';
+      if(/仅支持[^\n]{0,60}(?:Markdown|\.md)|(?:not|only)[^\n]{0,60}(?:Markdown|\.md)/i.test(errorText))message='有道仅支持更新 Markdown 笔记，请检查当前云端笔记格式；本机内容已保留。';
+      else if(/permission|forbidden|unauthori[sz]ed|没有权限|无权限|权限不足/i.test(errorText))message='有道未授予这次操作权限，请检查账号授权；本机内容已保留。';
+      if(numericCode!==null)message+='（服务代码 '+numericCode+'）';
+      throw failure(message);
     }
     return {data,text:texts.join('\n')};
   }
@@ -191,7 +207,7 @@
           const id=identifier(String(row.id??row.fileId??''));
           if(seen.has(id))continue;
           seen.add(id);added++;
-          result.push({id,title:String(row.name??row.title??''),directory:row.dir===true||row.directory===true||row.dir===1});
+          result.push({id,title:String(row.name??row.title??''),directory:row.dir===true||row.directory===true||row.dir===1,...(row.version!=null?{version:row.version}:{})});
         }
         const cursor=identifier(String(batch[batch.length-1].id??batch[batch.length-1].fileId??''));
         if(response.data.hasMore===false||response.data.hasNext===false)return result;
@@ -240,16 +256,26 @@
         const folder=String(this.store.data.config.youdao.folderId||'');if(!folder)throw Error('请先选择有道学习目录。');
         const entries=await this.list(folder);this.store.data.sync.notes||={};
         for(const note of this.store.data.workspace?.notes||[]){
-          const body=this.noteBody(note),meta=this.store.data.sync.notes[note.id]||{},digest=await this.hash(body),title='知序 · '+note.id+'.md';
+          const body=this.noteBody(note),meta=this.store.data.sync.notes[note.id]||{},digest=await this.hash(body),title='知序 · '+note.id+'.md',versionTitle='知序 · '+note.id+' · '+digest+'.md';
           try{
-            let cloudId=meta.cloudId&&entries.some(x=>x.id===meta.cloudId)?meta.cloudId:entries.find(x=>x.title===title&&!x.directory)?.id;
+            let cloudId=meta.cloudId&&entries.some(x=>x.id===meta.cloudId)?meta.cloudId:entries.find(x=>x.title===versionTitle&&!x.directory)?.id||entries.find(x=>x.title===title&&!x.directory)?.id;
+            let remoteHash;
             if(cloudId){
-              const remote=await this.read(cloudId),remoteHash=await this.hash(remote);
+              const remote=await this.read(cloudId);remoteHash=await this.hash(remote);
               if(remoteHash!==meta.cloudHash&&remoteHash!==digest&&forceId!==note.id){this.store.data.sync.notes[note.id]={...meta,cloudId,status:'conflict',remote,local:body,error:'有道笔记已变化，等待选择保留版本'};results.push({id:note.id,status:'conflict'});continue;}
-              if(remoteHash!==digest)await this.update(cloudId,body);
-            }else cloudId=await this.create(title,body);
+            }
+            // Verify every physical copy before accepting an unchanged version.
+            // A second copy may have been edited directly in Youdao.
+            const copies=entries.filter(x=>x.title===versionTitle&&!x.directory),acceptedRemoteVersions={};let match=null,changed=null;
+            for(const copy of copies){const remote=await this.read(copy.id),copyHash=await this.hash(remote);if(copyHash===digest)match||=copy.id;else if(forceId===note.id||meta.acceptedRemoteVersions?.[copy.id]===copyHash)acceptedRemoteVersions[copy.id]=copyHash;else changed={cloudId:copy.id,remote};}
+            if(changed&&forceId!==note.id){this.store.data.sync.notes[note.id]={...meta,...changed,status:'conflict',local:body,error:'有道笔记版本已变化，等待选择保留内容'};results.push({id:note.id,status:'conflict'});continue;}
+            if(!cloudId||remoteHash!==digest){
+              // An edited note is a new readable version. No existing user note
+              // is replaced, including when the user explicitly keeps local.
+              cloudId=match||await this.create(changed?versionTitle.replace(/\.md$/,' · '+crypto.randomUUID()+'.md'):versionTitle,body);
+            }
             if(await this.hash(await this.read(cloudId))!==digest)throw Error('有道笔记回读与本机内容不同，尚未确认同步成功。');
-            this.store.data.sync.notes[note.id]={cloudId,status:'synced',localHash:digest,cloudHash:digest,at:Date.now()};results.push({id:note.id,status:'synced'});
+            this.store.data.sync.notes[note.id]={cloudId,status:'synced',localHash:digest,cloudHash:digest,acceptedRemoteVersions,at:Date.now()};results.push({id:note.id,status:'synced'});
           }catch(error){this.store.data.sync.notes[note.id]={...meta,status:'failed',error:error.message};results.push({id:note.id,status:'failed',error:error.message});}
         }
         await this.store.commit();return results;
@@ -270,4 +296,5 @@
     }
   }
   global.WebYoudao=WebYoudao;
-})(window);
+  if(typeof module!=='undefined'&&module.exports)module.exports={WebYoudao,MCPConnection,parsedResult};
+})(typeof window!=='undefined'?window:globalThis);

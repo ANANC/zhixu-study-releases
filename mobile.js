@@ -111,7 +111,7 @@ async function webClearDevice(){if(busy)return toast('请等当前学习请求�
 
 cloudConflictModal=function(){
   const c=workspaceCloud.conflict;if(!c)return toast('目前没有待选择的版本');
-  openModal('检查学习数据版本',`<p>${esc(c.reason)}</p><div class="grid2 space"><div class="notice"><strong>此设备</strong><p>${cloudCount(c.local?.counts)}</p><p class="sub">${cloudTime(c.local?.at)}</p></div><div class="notice"><strong>有道学习空间</strong><p>${cloudCount(c.remote?.counts)}</p><p class="sub">${cloudTime(c.remote?.at)}</p></div></div>${c.preview?.changedNotes?.length?`<p class="space">笔记内容变化：${esc(c.preview.changedNotes.join('、'))}</p>`:''}<p class="sub space">计划、对话、课程与作业作为完整版本一起恢复。选择前保留当前版本备份；采用此设备版本时，有道原版本也会备份。</p><div class="actions space">${c.remoteHash?btn('采用有道版本到此设备',"resolveLearningCloud('remote')",'primary'):''}${btn('采用此设备版本到有道',"resolveLearningCloud('local')")}${btn('稍后处理','closeModal()')}</div>`);
+  openModal('检查学习数据版本',cloudConflictHTML(c,'此设备'));
 };
 
 const webOriginalToday=todayPage;

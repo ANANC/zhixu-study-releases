@@ -144,7 +144,7 @@ function readingHelpScope(item){
   const ordinaryReview=state.reviewRun,ordinaryMatches=ordinaryReview?.answer===null&&(source.courseId===ordinaryReview.course||readingQuestionMatches(item,courses[ordinaryReview.course]?.review));
   const diagnosis=typeof adaptiveData==='function'?adaptiveData().run:null;
   const diagnosisMatches=diagnosis&&!diagnosis.done&&!diagnosis.feedback&&(source.diagnosisId===diagnosis.id||readingQuestionMatches(item,diagnosis.questions?.[diagnosis.index]));
-  const sentenceReview=readingData().reviewRun,sentenceMatches=sentenceReview?.itemId===item.id&&sentenceReview.answer===null&&!sentenceReview.confirmed;
+  const sentenceReview=readingData().reviewRun,sentenceMatches=sentenceReview&&sentenceReview.answer===null&&!sentenceReview.confirmed&&(sentenceReview.itemId===item.id||readingQuestionMatches(item,{material:sentenceReview.task?.material}));
   return {session:courseMatches?session:null,homework:homeworkMatches?session.homework:null,ordinaryReview:ordinaryMatches?ordinaryReview:null,diagnosis:diagnosisMatches?diagnosis:null,sentenceReview:sentenceMatches?sentenceReview:null};
 }
 function readingPendingHelp(item){
