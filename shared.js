@@ -316,14 +316,31 @@ class WorkspaceCloud {
 
   // The CLI has no compare-and-swap API. Preserve both sides as immutable
   // versions before replacing the shared head, and verify its revision after.
-  async checkpoint(envelope){const title='知序学习版本 · '+this.data.spaceId+' · '+envelope.workspaceHash+'.md';const rows=await this.list();let noteId=this.single(rows,title);const content=body('zhixu-cloud-workspace:v1','知序完整学习数据版本',envelope);if(!noteId)noteId=await this.youdao.create(title,content);const verified=this.decode(await this.youdao.read(noteId));if(verified.workspaceHash!==envelope.workspaceHash)throw Error('完整学习版本备份核对失败，未覆盖云端主数据');return noteId;}
-  async deviceBackup(envelope){const title='知序设备备份 · '+this.data.spaceId+' · '+this.store.data.deviceId+'.md';const rows=await this.list();let noteId=this.single(rows,title);const content=body('zhixu-cloud-workspace:v1','本电脑最近完整学习备份',envelope);if(noteId)await this.youdao.update(noteId,content);else noteId=await this.youdao.create(title,content);if(this.decode(await this.youdao.read(noteId)).workspaceHash!==envelope.workspaceHash)throw Error('本电脑云端备份核对失败，未覆盖主数据');this.data.backupId=noteId;}
+  async verifyRead(read,matches,allowRetry=()=>true){
+    // Youdao may briefly return an older valid note immediately after accepting
+    // an update. Retry reads only: repeating a write could replace another
+    // device's work or create a second note after an uncertain response.
+    const delays=[0,350,700,1400,2500];let value=null;
+    for(let attempt=0;attempt<delays.length;attempt++){
+      if(delays[attempt])await new Promise(resolve=>setTimeout(resolve,delays[attempt]));
+      value=await read();
+      if(matches(value))return {matched:true,value};
+      if(!allowRetry(value))return {matched:false,value};
+    }
+    return {matched:false,value};
+  }
+  async checkpoint(envelope){const title='知序学习版本 · '+this.data.spaceId+' · '+envelope.workspaceHash+'.md';const rows=await this.list();let noteId=this.single(rows,title);const content=body('zhixu-cloud-workspace:v1','知序完整学习数据版本',envelope);if(!noteId)noteId=await this.youdao.create(title,content);const verified=await this.verifyRead(()=>this.youdao.read(noteId).then(value=>this.decode(value)),value=>value.workspaceHash===envelope.workspaceHash);if(!verified.matched)throw Error('完整学习版本备份核对失败，未覆盖云端主数据');return noteId;}
+  async deviceBackup(envelope){const title='知序设备备份 · '+this.data.spaceId+' · '+this.store.data.deviceId+'.md';const rows=await this.list();let noteId=this.single(rows,title);const content=body('zhixu-cloud-workspace:v1','本电脑最近完整学习备份',envelope);if(noteId)await this.youdao.update(noteId,content);else noteId=await this.youdao.create(title,content);const verified=await this.verifyRead(()=>this.youdao.read(noteId).then(value=>this.decode(value)),value=>value.workspaceHash===envelope.workspaceHash);if(!verified.matched)throw Error('本电脑云端备份核对失败，未覆盖主数据');this.data.backupId=noteId;}
   async publish(expectedRemote){const local=this.workspace();if(!local){this.data.status='pending';await this.save();return this.result();}const localHash=digest(local),localDataHash=learningHash(local),next=this.envelope(local,expectedRemote?.workspaceHash||null);if(expectedRemote)await this.checkpoint(expectedRemote);await this.checkpoint(next);await this.deviceBackup(next);
     const latest=await this.readRemote();if((latest?.workspaceHash||null)!==(expectedRemote?.workspaceHash||null))return this.conflict(latest,'上传前发现另一台电脑更新了完整学习数据，双方版本已保留，请重新选择。');
     // Saving in the editor while network operations run creates a later local
     // version. This upload remains a complete snapshot and schedules that one.
     const content=body('zhixu-cloud-workspace:v1','知序完整学习数据',next);let noteId=latest?.noteId;if(noteId)await this.youdao.update(noteId,content);else noteId=await this.youdao.create(this.workspaceTitle(),content);this.data.noteId=noteId;
-    const verified=await this.readRemote();if(!verified||verified.revision!==next.revision||verified.workspaceHash!==localHash)return this.conflict(verified,'主数据回读时出现了另一份版本，双方备份已保留，请确认后重试。');
+    // Only the known pre-write head can be treated as a temporarily stale read.
+    // A third version (including another revision with equal data) is a real
+    // concurrent change and must immediately enter the existing conflict flow.
+    const checked=await this.verifyRead(()=>this.readRemote(),value=>!!value&&value.revision===next.revision&&value.workspaceHash===localHash,value=>expectedRemote?!!value&&value.revision===expectedRemote.revision&&value.workspaceHash===expectedRemote.workspaceHash:!value);
+    const verified=checked.value;if(!checked.matched)return this.conflict(verified,'主数据回读时出现了另一份版本，双方备份已保留，请确认后重试。');
     this.data.baseHash=localHash;this.data.baselineLocalHash=localDataHash;this.data.lastSync=Date.now();this.data.error='';this.data.conflict=null;
     if(this.localDataHash()!==localDataHash){this.data.status='pending';this.data.pendingSince||=Date.now();await this.save();this.schedule();return this.result();}
     return this.markSynced(verified);
