@@ -106,6 +106,4 @@
  bridge.chooseAuthorizationFile=()=>chooseFile('.json');
  bridge.chooseBackupFile=()=>chooseFile('.json');
  window.study=bridge;
- 
- 
 })();
