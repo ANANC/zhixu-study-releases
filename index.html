@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f6fa">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="知序学习">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="description" content="围绕考试目标学习，以实际任务、错因补学和新题验证推进主题闭环。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'none'; manifest-src 'self'">
+  <title>知序学习</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="generated.css">
+  <link rel="stylesheet" href="interactions.css">
+  <link rel="stylesheet" href="mobile.css">
+</head>
+<body>
+  <div id="app"><main class="web-launch" aria-live="polite"><div class="web-launch-orb">知</div><h1>知序学习</h1><p>正在加载你的学习空间…</p></main></div>
+  <div id="modalroot"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <input id="attachment" type="file" accept=".txt,.md,.cpp,.h,.cs,.js" hidden data-change="attachFile(this)">
+  <noscript><div class="web-noscript">请在 Safari 中启用 JavaScript 后打开知序学习。</div></noscript>
+  <script src="shared.js"></script>
+  <script src="store.js"></script>
+  <script src="youdao.js"></script>
+  <script src="ai.js"></script>
+  <script src="cloud-protocol.js"></script>
+  <script src="adapter.js"></script>
+  <script src="generated.js"></script>
+  <script src="desktop.js"></script>
+  <script src="providers.js"></script>
+  <script src="task-library.js"></script>
+  <script src="adaptive.js"></script>
+  <script src="interactions.js"></script>
+  <script src="cloud.js"></script>
+  <script src="mobile.js"></script>
+</body>
+</html>
