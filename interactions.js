@@ -32,11 +32,20 @@ async function chooseAnswer(token,letter){
  if(draft.trim()){state.choiceDrafts||={};state.choiceDrafts[key]=draft;}
  if(!input)return;
  input.value=letter;
- try{await sendAI();}finally{
+ try{await (typeof runTaskInteraction==='function'?runTaskInteraction('chooseAnswer',()=>sendAI()):sendAI());}finally{
   if(state.choiceDrafts?.[key]){state.drafts[key]=state.choiceDrafts[key];delete state.choiceDrafts[key];save();const current=document.getElementById('aiInput');if(current&&draftKey()===key)current.value=state.drafts[key];}
  }
 }
 actions.add('chooseAnswer');
+// The "not sure" shortcut also keeps an unfinished conversation draft.
+if(typeof adaptiveUnknown==='function'){
+ const choiceUnknown=adaptiveUnknown;
+ adaptiveUnknown=async function(){
+  if(busy||adaptiveData().run?.feedback)return;
+  const key=draftKey(),draft=document.getElementById('aiInput')?.value||state.drafts[key]||'';
+  try{return await choiceUnknown();}finally{if(draft.trim()){state.drafts[key]=draft;save();const input=document.getElementById('aiInput');if(input&&draftKey()===key)input.value=draft;}}
+ };
+}
 const choiceGoto=goto;
 goto=function(page){if(page==='courses')state.selected=null;return choiceGoto(page);};
 if(!desktop)render();
