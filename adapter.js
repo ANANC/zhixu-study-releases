@@ -110,7 +110,7 @@
   const method=methods[name];methods[name]=(...args)=>{assertNoDeviceOperation();return method(...args);};
  }
  const bridge={isWeb:true,onEvent(fn){listeners.add(fn);return ()=>listeners.delete(fn);},ready};
- for(const name of Object.keys(methods).concat(['designAdaptiveDiagnosis','designAdaptiveLoop','explainReadingTerm']))bridge[name]=async(...args)=>{await ready;return methods[name](...args);};
+ for(const name of Object.keys(methods).concat(['designAdaptiveDiagnosis','designAdaptiveLoop','explainReadingTerm','explainReadingDocument']))bridge[name]=async(...args)=>{await ready;return methods[name](...args);};
  bridge.chooseAuthorizationFile=()=>chooseFile('.json');
  bridge.chooseBackupFile=()=>chooseFile('.json');
  window.study=bridge;

@@ -2,6 +2,7 @@
 // Sentence memory lives with the saved reading context, independently of the
 // formal course mastery and course-review records. All replies use the composer.
 const readingReviewIntervals=[1,3,7,14];
+let pendingReadingMaterialPractice=null;
 function readingReviewToday(){const d=new Date();return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
 function readingReviewDate(days,from=readingReviewToday()){const d=new Date(from+'T12:00:00');d.setDate(d.getDate()+days);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
 function readingReviewData(){const r=readingData();if(!r.review||typeof r.review!=='object'||Array.isArray(r.review))r.review={};return r;}
@@ -13,6 +14,7 @@ function readingReviewFor(item,create=false){
  return entry;
 }
 function readingReviewCurrent(){const run=readingReviewData().reviewRun;return state.page==='review'&&run&&!run.parked&&readingItem(run.itemId)?run:null;}
+function readingReviewUnfinished(run){return !!run&&(!run.confirmed||!!run.materialPractice&&!run.materialPractice.finished);}
 function readingReviewNormalize(value){return String(value||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLocaleLowerCase('en');}
 function readingReviewCloze(sentence,term){
  const escaped=term.trim().replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s+');
@@ -21,6 +23,60 @@ function readingReviewCloze(sentence,term){
  expression.lastIndex=0;
  return {material:sentence.replace(expression,(_,prefix)=>prefix+'________'),answer:match[2]};
 }
+function readingMaterialPracticeGroup(queue,index=queue.index){
+ const saved=queue.groups?.[index];if(!saved)return null;
+ const items=(saved.itemIds||[]).map(readingItem).filter(item=>item&&item.status!=='archived'&&item.source?.materialKey===queue.materialKey);
+ const item=items.find(value=>value.id===saved.itemId)||items[0];if(!item)return null;
+ const sentence=item.sentence.trim(),matching=items.filter(value=>readingNormalize(value.sentence)===readingNormalize(sentence));
+ return {item,items:matching,sentence,terms:[...new Set(matching.map(value=>value.term))]};
+}
+function readingMaterialPracticeTargets(sentence,items){
+ const candidates=[];for(const item of items)for(const match of readingTermMatches(sentence,item.term))candidates.push({...match,itemIds:[item.id],terms:[item.term]});
+ candidates.sort((a,b)=>a.start-b.start||b.end-a.end);const merged=[];
+ for(const match of candidates){const last=merged.at(-1);if(last&&match.start<last.end){last.end=Math.max(last.end,match.end);last.itemIds=[...new Set([...last.itemIds,...match.itemIds])];last.terms=[...new Set([...last.terms,...match.terms])];}else merged.push({...match,itemIds:[...match.itemIds],terms:[...match.terms]});}
+ return merged.map((target,index)=>({...target,number:index+1,answer:sentence.slice(target.start,target.end)}));
+}
+function readingMaterialPracticeTask(queue,mode='cloze'){
+ const group=readingMaterialPracticeGroup(queue);if(!group)throw Error('这句原文的标记已移除，请继续下一句');
+ const {sentence,items,terms}=group,targets=readingMaterialPracticeTargets(sentence,items),groupItemIds=items.map(item=>item.id);
+ if(!targets.length)throw Error('这句标记与原文已不匹配，请重新标记后练习');
+ const shared={targets,groupItemIds,originalSentence:sentence,origin:'本篇原句'};
+ if(mode==='memory')return {...shared,mode,scope:'本篇原句的完整文字回忆',material:'凭记忆写出本篇练习的第 '+(queue.index+1)+' 句完整原文。',prompt:'写出完整英文原句，包含这句中标记的所有表达。作答前隐藏原文和表达答案。',reference:sentence,answer:sentence,criteria:[],grading:'exact-sentence',rule:'只核对这一原句的文字回忆，忽略大小写与连续空白；不据此认定词义、迁移能力或全文理解已掌握。查看原文或释义会计为帮助。'};
+ if(mode==='meaning'){
+  const translation=items.map(item=>item.explanation?.originalTranslation?.trim()).find(Boolean),hasReferences=!!translation&&items.every(item=>item.explanation?.meaning?.trim()||item.explanation?.usage?.trim());
+  const reference=hasReferences?'原句完整释义：'+translation+'\n'+items.map(item=>'表达“'+item.term+'”：'+[item.explanation.meaning,item.explanation.usage].filter(Boolean).join('；')).join('\n'):'';
+  return {...shared,mode,scope:'本篇原句与全部标记表达的理解',material:sentence,prompt:'用自己的话说明整句发生了什么、各部分怎样关联，并结合原句分别解释这些标记表达：'+terms.join('、')+'。',reference,criteria:['完整说明这一原句的主要事实与关系，不改变原意','逐一解释本句全部标记表达的含义或作用，并提供句内依据'],grading:hasReferences?'semantic':'self',rule:hasReferences?'按已保存的句中参考逐项评审，只覆盖当前原句与这些标记，不推定全文理解。':'当前并非每个表达都有已保存的句中参考。回答可以离线保留并自查，不自动认定通过；语境填句和整句回忆仍可自动限定核对。'};
+ }
+ let material='',end=0;for(const target of targets){material+=sentence.slice(end,target.start)+'____('+target.number+')____';end=target.end;}material+=sentence.slice(end);
+ return {...shared,mode:'cloze',scope:'本篇原句 '+targets.length+' 空的语境填句',material,prompt:'按空号顺序填回全部 '+targets.length+' 处表达。用 |、分号或换行分隔各空答案（例如：第1空的表达 | 第2空的表达），也可以直接写出补完整的整句。同一表达重复出现时，每个空都要填写。',reference:sentence,answer:targets.map(target=>target.answer).join(' | '),criteria:[],grading:'exact-targets',rule:'空按原文位置排列，重叠的词或短语合并为一个空。只核对保存原句中的指定表达，忽略大小写、连续空白及弯直撇号；其他合理改写可改用整句理解，不把这次填句当作全文理解或考试通过证据。'};
+}
+function readingStartMaterialGroup(queue){
+ const group=readingMaterialPracticeGroup(queue);if(!group)return toast('这句原文的标记已移除，请从当前材料重新开始');const task=readingMaterialPracticeTask(queue,'cloze');
+ rememberDraft();pauseActive();closeModal();readingReviewFor(group.item,true);
+ readingReviewData().reviewRun={id:'reading-review-'+crypto.randomUUID(),itemId:group.item.id,mode:task.mode,task,groupItemIds:[...task.groupItemIds],materialPractice:queue,startedAt:Date.now(),hinted:false,answer:null,answered:false,result:null,confirmed:false,parked:false,chat:false,messages:[]};
+ state.page='review';readingReviewPersist();render('top');document.getElementById('aiInput')?.focus();
+}
+function startReadingMaterialPractice(token){
+ if(busy||window.studyDataReplacing)return toast('请等当前请求完成');
+ const entry=(typeof readingMaterialContext==='function'?readingMaterialContext(token):null)||readingMaterial(token);if(!entry)return toast('阅读材料已变化，请回到当前文章重新开始');
+ const key=entry.key,text=String(entry.text??entry.root?.textContent??''),items=readingMaterialItems(key),groups=new Map();
+ for(const item of items){const sentence=item.sentence?.trim();if(!sentence||!readingTermMatches(sentence,item.term).length)continue;const id=readingNormalize(sentence);let group=groups.get(id);if(!group){group={itemId:item.id,itemIds:[],position:readingNormalize(text).indexOf(id)};groups.set(id,group);}group.itemIds.push(item.id);}
+ const ordered=[...groups.values()].sort((a,b)=>(a.position<0?Infinity:a.position)-(b.position<0?Infinity:b.position));
+ if(!ordered.length)return toast('先在这篇材料里标记一个不认识的表达，再开始本篇练习');
+ const queue={id:'material-practice-'+crypto.randomUUID(),materialKey:key,source:readingSourceLabel(items[0]),groups:ordered,index:0,completed:[],skipped:[],startedAt:Date.now(),finished:false},old=readingReviewData().reviewRun;
+ if(readingReviewUnfinished(old)){if(old.materialPractice?.materialKey===key){resumeReadingReview();return;}pendingReadingMaterialPractice=queue;openModal('保留当前练习再练本篇',`<p>当前句子或文章练习还没结束。可以继续当前练习，或先保留为暂停记录，再练本篇的 ${ordered.length} 句原文。</p><div class="actions space">${btn('继续当前练习','resumeReadingReview()','primary')}${btn('保留并练本篇',`replaceReadingMaterialPractice('${queue.id}')`)}${btn('取消','closeModal()')}</div>`);return;}
+ pendingReadingMaterialPractice=null;readingStartMaterialGroup(queue);
+}
+function replaceReadingMaterialPractice(id){
+ if(busy||window.studyDataReplacing)return;const queue=pendingReadingMaterialPractice;if(!queue||queue.id!==id)return toast('本篇练习入口已变化，请从当前文章重新开始');
+ rememberDraft();const r=readingReviewData(),old=r.reviewRun;if(readingReviewUnfinished(old)){r.pausedReviews||=[];r.pausedReviews.unshift({...JSON.parse(JSON.stringify(old)),draft:state.drafts['reading-review:'+old.id]||'',pausedAt:Date.now()});}
+ pendingReadingMaterialPractice=null;readingStartMaterialGroup(queue);
+}
+function readingMaterialPracticeSummaryHTML(run){
+ const queue=run.materialPractice,confirmed=queue.completed?.length||0,passed=(queue.completed||[]).filter(row=>row.pass===true).length,skipped=queue.skipped?.length||0;
+ return `<div class="section">${head('本篇标记练习已完成',queue.source||'实际阅读材料')}${panel('这次练习的范围',`<p>已确认 ${confirmed} / ${queue.groups.length} 句原文，其中 ${passed} 句符合本次限定核对，${confirmed-passed} 句作为训练或自检保留。${skipped?'另有 '+skipped+' 句的标记已移除，已跳过。':''}</p><p class="sub space">这里记录的是标记原句的练习范围，不代表全文已理解或考试已通过。各句的回答、帮助情况和来源保存在句子记忆记录中。</p><div class="actions space">${btn('返回复习队列','returnFromReadingMaterialPractice()','primary')}${btn('查看最后一句记录',`readingReviewHistory('${run.itemId}')`,'small')}</div>`)}</div>`;
+}
+function returnFromReadingMaterialPractice(){if(busy)return;rememberDraft();const run=readingReviewData().reviewRun;if(run)run.parked=true;state.page='review';readingReviewPersist();render('top');}
 function readingReviewTask(item,mode='meaning'){
  const explanation=item.explanation||{},sentence=item.sentence.trim();
  const originalReference=typeof explanation.originalTranslation==='string'?explanation.originalTranslation.trim():'';
@@ -48,15 +104,16 @@ function readingReviewHiddenSentence(item){
 }
 function readingReviewQueueHTML(limit=6){
  const r=readingReviewData(),today=readingReviewToday(),rows=readingReviewItems().sort((a,b)=>readingReviewFor(a).due.localeCompare(readingReviewFor(b).due)),due=rows.filter(item=>readingReviewFor(item).due<=today);
- const parked=r.reviewRun?.parked&&!r.reviewRun.confirmed?`<div class="notice space"><strong>有一轮句子练习已暂停</strong><div class="actions space">${btn('继续当前句子','resumeReadingReview()','primary small')}</div></div>`:'';
+ const parked=r.reviewRun?.parked&&readingReviewUnfinished(r.reviewRun)?`<div class="notice space"><strong>${r.reviewRun.materialPractice?'有一篇标记练习已暂停':'有一轮句子练习已暂停'}</strong><div class="actions space">${btn('继续当前练习','resumeReadingReview()','primary small')}</div></div>`:'';
  if(!rows.length)return panel('语境句子复习',`<p class="sub">阅读时保存看不懂的表达与原句，这里会安排完整句子理解和回忆。用原句、新例句与填句练习巩固语境，不做孤立单词卡。</p>`);
  const visible=limit?rows.slice(0,limit):rows;
  return panel('语境句子复习',`<p>${due.length} 条已到期 · 共 ${rows.length} 条保存的句子</p><p class="sub">先理解完整句子，再回忆整句或练语境填句。间隔按 1、3、7、14 天推进；提示、未通过或自检会安排次日再练。提前练习会保留记录，不提前递增间隔。</p>${parked}<div class="actions space">${btn(due.length?'开始到期句子':'提前练一句','startNextReadingReview()','primary small')}${rows.length>limit&&limit?btn('查看全部句子','showAllReadingReviews()','small'):!limit?btn('收起列表','showAllReadingReviews(0)','small'):''}${r.pausedReviews?.length?btn('此前暂停的句子',"readingPausedReviews()",'small'):''}</div>${visible.map(item=>{const entry=readingReviewFor(item),last=entry.attempts?.at(-1),hidden=readingReviewHiddenSentence(item);return `<div class="item reading-review-list-item"><div class="grow"><p class="reading-sentence">${readingSentenceHTML(item)}</p><div class="sub">${hidden?'待完成的回忆句子':esc(item.term)} · ${esc(readingReviewSource(item))}</div><div class="tiny">${esc(entry.due)} · ${entry.due<=today?'到期可复习':'尚未到期'} · ${entry.attempts?.length||0} 次记录${last?' · '+(last.source==='用户自检'?'上次为用户自检':last.hinted?'上次使用提示':last.pass?'上次完成限定任务':'仍需补学'):''}</div></div><div class="actions">${btn('理解整句',`startReadingReview('${item.id}')`,'small')}${btn('回忆整句',`startReadingReview('${item.id}','memory')`,'small')}${entry.attempts?.length?btn('记录',`readingReviewHistory('${item.id}')`,'small'):''}</div></div>`;}).join('')}`);
 }
 function readingReviewRunHTML(run){
+ if(run.materialPractice?.finished)return readingMaterialPracticeSummaryHTML(run);
  const item=readingItem(run.itemId),task=run.task,result=run.result;if(!task)return readingReviewQueueHTML();
- const modes=`<div class="actions space">${btn('理解原句',"setReadingReviewMode('meaning')",'small')}${item.explanation?.example&&item.explanation?.translation&&item.explanation?.question&&item.explanation?.expected?btn('理解新例句',"setReadingReviewMode('new-meaning')",'small'):''}${btn('回忆整句',"setReadingReviewMode('memory')",'small')}${readingReviewCloze(item.sentence,item.term)||(item.explanation?.example&&readingReviewCloze(item.explanation.example,item.term))?btn('语境填句',"setReadingReviewMode('cloze')",'small'):''}</div>`;
- const top=head('句子理解与记忆',readingReviewSource(item));
+ const grouped=!!run.materialPractice,modes=`<div class="actions space">${btn('理解原句',"setReadingReviewMode('meaning')",'small')}${!grouped&&item.explanation?.example&&item.explanation?.translation&&item.explanation?.question&&item.explanation?.expected?btn('理解新例句',"setReadingReviewMode('new-meaning')",'small'):''}${btn('回忆整句',"setReadingReviewMode('memory')",'small')}${grouped||readingReviewCloze(item.sentence,item.term)||(item.explanation?.example&&readingReviewCloze(item.explanation.example,item.term))?btn('语境填句',"setReadingReviewMode('cloze')",'small'):''}</div>`;
+ const top=head(grouped?'本篇标记 · 第 '+(run.materialPractice.index+1)+' / '+run.materialPractice.groups.length+' 句':'句子理解与记忆',grouped?run.materialPractice.source:readingReviewSource(item));
  const material=`<section class="task reading-review-task">${badge(task.scope)}<div class="task-material">${esc(task.material)}</div><div class="question">${esc(task.prompt)}</div><p class="sub">${esc(task.rule)}</p></section>`;
  if(run.answer===null){
   const hint=run.hinted?`<div class="notice amber space"><strong>这轮已使用帮助，作为训练保留。</strong>${run.hintText?`<div class="sub space">${esc(run.hintText)}</div>`:''}</div>`:'';
@@ -64,7 +121,8 @@ function readingReviewRunHTML(run){
  }
  const independent=result?.pass===true,feedback=result?.feedback||'回答已保留，等待评审或自检。';
  const label=result?.source==='用户自检'?'理解已保存 · 未判定通过':independent?'本次限定任务已完成':result?.judgmentPass&&run.answeredHinted?'回答符合参考 · 有帮助的训练':result?.status==='pending'?'评审待完成':'本次需要补学或再回忆';
- const evidence=panel('本次句子练习记录',`<div class="notice ${independent?'green':'amber'}"><strong>${esc(label)}</strong><div class="sub space">${esc(feedback)}</div></div><p class="sub space">${esc(result?.source||'等待评审')} · ${esc(task.scope)}</p>${result?.rubric?.length?`<div class="space">${result.rubric.map(row=>`<div class="item"><div class="grow"><strong>${row.pass?'✓':'待补'} ${esc(row.label)}</strong><div class="sub">${esc(row.reason)}</div></div></div>`).join('')}</div>`:''}<details class="space"><summary>查看本次回答与作答后参考</summary><div class="notice space"><strong>你的回答</strong><div class="sub space">${esc(run.answer)}</div></div><p class="sub space">${esc(task.reference||'暂无可靠参考。你的历史理解不作为通过标准。')}</p></details><p class="sub space">${run.confirmed?'已记入语境复习，下一次：'+esc(readingReviewFor(item).due)+'。':'确认后保存本次回答与证据来源；未通过、有提示或仅自检会次日再练。'}本轮不改变正式课程掌握度。</p><div class="actions space">${!run.confirmed?btn(result?.source==='用户自检'?'我已自查，保存记录':'确认并保存复习记录','confirmReadingReview()','primary'):btn('下一条句子','startNextReadingReview()','primary')}${!run.confirmed&&task.grading==='semantic'&&result?.status==='pending'?btn('重试 AI 评审','retryReadingReviewGrade()'):''}${!run.confirmed?btn('修订回答','reviseReadingReview()','small'):''}${btn('讨论这句','readingReviewConversation(1)','small')}${btn('返回复习队列','pauseReadingReview()','small')}</div>`);
+ const nextLabel=grouped?(run.materialPractice.index+1>=run.materialPractice.groups.length?'查看本篇完成情况':'本篇下一句'):'下一条句子';
+ const evidence=panel('本次句子练习记录',`<div class="notice ${independent?'green':'amber'}"><strong>${esc(label)}</strong><div class="sub space">${esc(feedback)}</div></div><p class="sub space">${esc(result?.source||'等待评审')} · ${esc(task.scope)}</p>${result?.rubric?.length?`<div class="space">${result.rubric.map(row=>`<div class="item"><div class="grow"><strong>${row.pass?'✓':'待补'} ${esc(row.label)}</strong><div class="sub">${esc(row.reason)}</div></div></div>`).join('')}</div>`:''}<details class="space"><summary>查看本次回答与作答后参考</summary><div class="notice space"><strong>你的回答</strong><div class="sub space">${esc(run.answer)}</div></div><p class="sub space">${esc(task.reference||'暂无可靠参考。你的历史理解不作为通过标准。')}</p></details><p class="sub space">${run.confirmed?'已记入语境复习，下一次：'+esc(readingReviewFor(item).due)+'。':'确认后保存本次回答与证据来源；未通过、有提示或仅自检会次日再练。'}本轮不改变正式课程掌握度。${grouped?'同句多个表达合成一份练习证据，统一记在主条目中，不重复递增各词的复习间隔。':''}</p><div class="actions space">${!run.confirmed?btn(result?.source==='用户自检'?'我已自查，保存记录':'确认并保存复习记录','confirmReadingReview()','primary'):btn(nextLabel,'startNextReadingReview()','primary')}${!run.confirmed&&task.grading==='semantic'&&result?.status==='pending'?btn('重试 AI 评审','retryReadingReviewGrade()'):''}${!run.confirmed?btn('修订回答','reviseReadingReview()','small'):''}${btn('讨论这句','readingReviewConversation(1)','small')}${btn('返回复习队列','pauseReadingReview()','small')}</div>`);
  return `<div class="section">${top}${material}${evidence}</div>`;
 }
 const readingReviewBasePage=reviewPage;
@@ -82,30 +140,45 @@ contextFor=function(c,s){const run=readingReviewCurrent();if(!run)return reading
 const readingReviewBaseRender=render;
 render=function(where){readingReviewBaseRender(where);const run=readingReviewCurrent();if(!run)return;const button=document.querySelector('.composefoot [data-action="sendAI()"]');if(button)button.textContent=run.chat||run.confirmed?'发送 ↑':'提交句子 ↑';const foot=document.querySelector('.composefoot .tiny');if(foot&&!busy)foot.textContent=run.chat||run.confirmed?'围绕当前句子交流 · 仍使用中央输入':run.answer!==null?'先确认本次记录，或点击修订':'当前输入用于语境句子练习 · 不改变课程掌握度';};
 function showAllReadingReviews(value=true){if(busy)return;readingReviewData().showAllReviews=!!value;render('top');}
-function startNextReadingReview(){if(busy)return toast('请等当前请求完成');const rows=readingReviewItems().sort((a,b)=>readingReviewFor(a).due.localeCompare(readingReviewFor(b).due));if(!rows.length)return toast('先从阅读材料保存一条语境句子');const last=readingReviewData().reviewRun?.itemId;startReadingReview(rows.find(item=>item.id!==last&&readingReviewFor(item).due<=readingReviewToday())?.id||rows.find(item=>item.id!==last)?.id||rows[0].id);}
+function startNextReadingReview(){
+ if(busy)return toast('请等当前请求完成');const current=readingReviewCurrent();
+ if(current?.materialPractice){
+  if(!current.confirmed)return toast('先提交并确认当前句子的练习记录');const queue=JSON.parse(JSON.stringify(current.materialPractice));let index=queue.index+1;
+  while(index<queue.groups.length&&!readingMaterialPracticeGroup(queue,index)){queue.skipped||=[];if(!queue.skipped.includes(index))queue.skipped.push(index);index++;}
+  if(index>=queue.groups.length){current.materialPractice.finished=true;current.materialPractice.skipped=queue.skipped||[];readingReviewPersist();render('top');return;}
+  queue.index=index;readingStartMaterialGroup(queue);return;
+ }
+ const rows=readingReviewItems().sort((a,b)=>readingReviewFor(a).due.localeCompare(readingReviewFor(b).due));if(!rows.length)return toast('先从阅读材料保存一条语境句子');const last=readingReviewData().reviewRun?.itemId;startReadingReview(rows.find(item=>item.id!==last&&readingReviewFor(item).due<=readingReviewToday())?.id||rows.find(item=>item.id!==last)?.id||rows[0].id);
+}
 function startReadingReview(id,mode='meaning',replace=false){
  if(busy)return toast('请等当前请求完成');const item=readingItem(id);if(!item)return toast('语境记录不存在');const r=readingReviewData(),old=r.reviewRun;
- if(old&&!old.confirmed&&!replace){if(old.itemId===id){rememberDraft();old.parked=false;pauseActive();state.page='review';readingReviewPersist();render('top');return;}openModal('当前句子还没完成',`<p>可以继续当前句子，或把当前回答和草稿保留为暂停记录后换一句。</p><div class="actions space">${btn('继续当前句子','resumeReadingReview()','primary')}${btn('保留并换一句',`replaceReadingReview('${id}','${mode}')`)}${btn('取消','closeModal()')}</div>`);return;}
+ if(readingReviewUnfinished(old)&&!replace){if(old.itemId===id){rememberDraft();old.parked=false;pauseActive();state.page='review';readingReviewPersist();render('top');return;}openModal('当前练习还没结束',`<p>可以继续当前练习，或把当前回答、草稿及本篇进度保留为暂停记录后换一句。</p><div class="actions space">${btn('继续当前练习','resumeReadingReview()','primary')}${btn('保留并换一句',`replaceReadingReview('${id}','${mode}')`)}${btn('取消','closeModal()')}</div>`);return;}
  rememberDraft();pauseActive();closeModal();const task=readingReviewTask(item,mode);readingReviewFor(item,true);
  r.reviewRun={id:'reading-review-'+crypto.randomUUID(),itemId:id,mode:task.mode,task,startedAt:Date.now(),hinted:false,answer:null,answered:false,result:null,confirmed:false,parked:false,chat:false,messages:[]};
  state.page='review';readingReviewPersist();render('top');document.getElementById('aiInput')?.focus();
 }
 function replaceReadingReview(id,mode='meaning'){
- if(busy)return;rememberDraft();const r=readingReviewData(),old=r.reviewRun;if(old&&!old.confirmed){r.pausedReviews||=[];r.pausedReviews.unshift({...JSON.parse(JSON.stringify(old)),draft:state.drafts['reading-review:'+old.id]||'',pausedAt:Date.now()});}startReadingReview(id,mode,true);
+ if(busy)return;rememberDraft();const r=readingReviewData(),old=r.reviewRun;if(readingReviewUnfinished(old)){r.pausedReviews||=[];r.pausedReviews.unshift({...JSON.parse(JSON.stringify(old)),draft:state.drafts['reading-review:'+old.id]||'',pausedAt:Date.now()});}startReadingReview(id,mode,true);
 }
 function readingPausedReviews(){if(busy)return;const rows=readingReviewData().pausedReviews||[];openModal('此前暂停的句子',`<p class="sub">回答和草稿仍保留，可恢复后继续；未确认的回答不算通过记录。</p>${rows.filter(run=>readingItem(run.itemId)).map(run=>`<div class="item"><div class="grow"><strong>${esc(readingReviewSource(readingItem(run.itemId)))}</strong><div class="sub">${esc(run.task?.scope||'句子练习')} · ${new Date(run.pausedAt||run.startedAt).toLocaleString('zh-CN')}</div></div>${btn('恢复这轮',`resumePausedReadingReview('${run.id}')`,'small')}</div>`).join('')||'<p>没有可恢复的暂停记录。</p>'}${btn('关闭','closeModal()')}`);}
-function resumePausedReadingReview(id){if(busy)return;const r=readingReviewData(),index=(r.pausedReviews||[]).findIndex(run=>run.id===id);if(index<0)return;rememberDraft();const chosen=r.pausedReviews.splice(index,1)[0],old=r.reviewRun;if(old&&!old.confirmed)r.pausedReviews.unshift({...JSON.parse(JSON.stringify(old)),draft:state.drafts['reading-review:'+old.id]||'',pausedAt:Date.now()});r.reviewRun=chosen;chosen.parked=false;state.drafts['reading-review:'+chosen.id]||=chosen.draft||'';pauseActive();state.page='review';closeModal();readingSave().catch(showError);render('top');}
+function resumePausedReadingReview(id){if(busy)return;const r=readingReviewData(),index=(r.pausedReviews||[]).findIndex(run=>run.id===id);if(index<0)return;rememberDraft();const chosen=r.pausedReviews.splice(index,1)[0],old=r.reviewRun;if(readingReviewUnfinished(old))r.pausedReviews.unshift({...JSON.parse(JSON.stringify(old)),draft:state.drafts['reading-review:'+old.id]||'',pausedAt:Date.now()});r.reviewRun=chosen;chosen.parked=false;state.drafts['reading-review:'+chosen.id]||=chosen.draft||'';pauseActive();state.page='review';closeModal();readingSave().catch(showError);render('top');}
 function resumeReadingReview(){if(busy)return;const run=readingReviewData().reviewRun;if(!run)return toast('当前没有暂停的句子练习');rememberDraft();pauseActive();run.parked=false;state.page='review';closeModal();readingReviewPersist();render('top');}
 function pauseReadingReview(){if(busy)return;rememberDraft();const run=readingReviewData().reviewRun;if(run)run.parked=true;closeModal();readingReviewPersist();render('top');}
-function setReadingReviewMode(mode){if(busy)return;const run=readingReviewCurrent();if(!run||run.answer!==null||run.confirmed)return toast('先确认这次记录，再开始新题型');rememberDraft();const task=readingReviewTask(readingItem(run.itemId),mode);if(run.mode!==mode&&(mode==='memory'||mode==='cloze')&&['meaning','new-meaning'].includes(run.mode)){run.hinted=true;run.hintText='本轮已看过完整句子，再换回忆或填句作为训练；新开一轮再独立回忆。';}run.task=task;run.mode=task.mode;run.chat=false;readingReviewPersist();render('top');}
+function setReadingReviewMode(mode){if(busy)return;const run=readingReviewCurrent();if(!run||run.answer!==null||run.confirmed)return toast('先确认这次记录，再开始新题型');if(run.materialPractice&&!['meaning','memory','cloze'].includes(mode))return toast('本篇练习围绕同一原句进行，请选择填句、整句理解或回忆');rememberDraft();const task=run.materialPractice?readingMaterialPracticeTask(run.materialPractice,mode):readingReviewTask(readingItem(run.itemId),mode);if(run.mode!==mode&&(mode==='memory'&&(run.materialPractice||['meaning','new-meaning'].includes(run.mode))||mode==='cloze'&&['meaning','new-meaning'].includes(run.mode))){run.hinted=true;run.hintText='本轮已经看过相关原文，再换回忆或填句作为训练；新开一轮再独立回忆。';}run.task=task;run.groupItemIds=task.groupItemIds||run.groupItemIds;run.mode=task.mode;run.chat=false;readingReviewPersist();render('top');}
 function hintReadingReview(){
  if(busy)return;const run=readingReviewCurrent();if(!run||run.answer!==null)return;const item=readingItem(run.itemId),e=item.explanation||{};
+ if(run.materialPractice){run.hinted=true;const explanations=(run.task.groupItemIds||[]).map(readingItem).filter(Boolean).map(value=>[value.term,value.explanation?.meaning,value.explanation?.usage].filter(Boolean).join('：'));run.hintText='原句：'+run.task.originalSentence+(explanations.length?'\n已保存的句中解释（需核对）：\n'+explanations.join('\n'):'');readingReviewPersist();render();return;}
  run.hinted=true;run.hintText=run.mode==='memory'?'原句：'+item.sentence:[e.meaning,e.usage,run.mode==='new-meaning'?e.translation:e.originalTranslation].filter(Boolean).join('\n')||'暂无句中解释。可以在中央和 AI 讨论，或回笔记请求句中解释；这轮帮助会作为训练记录。';
  readingReviewPersist();render();
 }
 function readingReviewConversation(value=true){if(busy)return;const run=readingReviewCurrent();if(!run)return;run.chat=!!value;if(value&&run.answer===null)run.hinted=true;readingReviewPersist();render();document.getElementById('aiInput')?.focus();}
 async function gradeReadingReview(run){
  const task=run.task;
+ if(task.grading==='exact-targets'){
+  const normal=value=>readingReviewNormalize(readingNormalize(value)),targets=task.targets||[],parts=run.answer.trim().split(/\s*(?:\r?\n|\||[;；])\s*/).filter(Boolean).map(value=>value.replace(/^\s*\d+\s*[).、:：]\s*/,''));
+  const full=normal(run.answer)===normal(task.reference),match=full||parts.length===targets.length&&targets.every((target,index)=>normal(parts[index])===normal(target.answer));
+  return {status:'graded',source:'本篇原句多表达限定核对',judgmentPass:match,pass:match&&!run.answeredHinted,feedback:match?'已按原文顺序补回这句的全部指定表达。'+(run.answeredHinted?'本轮使用过帮助，只计训练。':'本证据仅覆盖当前句子的限定填句。'):'尚未按原文顺序补全全部指定表达。请用 |、分号或换行分隔每个空的答案，也可提交完整原句；其他合理改写可以改用整句理解。',rubric:targets.map((target,index)=>({label:'第 '+target.number+' 空',pass:full||parts.length===targets.length&&normal(parts[index])===normal(target.answer),reason:full||parts.length===targets.length&&normal(parts[index])===normal(target.answer)?'符合保存原句中的指定表达':'未与保存原句中的指定表达一致'}))};
+ }
  if(task.grading==='exact-sentence'||task.grading==='exact-term'){
   const normal=readingReviewNormalize(run.answer),match=normal===readingReviewNormalize(task.answer)||(task.grading==='exact-term'&&normal===readingReviewNormalize(task.reference));
   return {status:'graded',source:task.grading==='exact-term'?'保存句子的限定填词核对':'保存原句的完整文字核对',judgmentPass:match,pass:match&&!run.answeredHinted,feedback:match?'符合本次保存句子的文字核对规则。'+(run.answeredHinted?'这轮使用过帮助，仅作训练。':'该证据只覆盖本次限定任务。'):'未与保存句子的文字一致。完整表达可能有其他合理写法；本次只作限定回忆检查，可以切换整句理解再评审。',rubric:[]};
@@ -122,7 +195,7 @@ async function submitReadingReview(value){
  try{await readingSave();run.result=await gradeReadingReview(run);append(run.messages,run.result.feedback,run.result.source);}catch(error){run.result={status:'pending',source:'评审未完成',judgmentPass:null,pass:null,feedback:error.message||'本次评审未完成，回答已保留',rubric:[]};append(run.messages,run.result.feedback,'请求未完成');}finally{busy=false;await readingSave().catch(showError);render('bottom');}
 }
 const readingReviewBaseSend=sendAI;
-sendAI=async function(){const run=readingReviewCurrent();if(!run)return readingReviewBaseSend();if(busy)return;const value=document.getElementById('aiInput')?.value.trim();if(!value)return;if(run.chat||run.confirmed)return converseReadingReview(value);if(run.answer!==null)return toast('这轮已提交，请先确认记录或点击修订回答');if(/^(?:提示|查看提示|解释一下|帮我理解|看看原句)$/.test(value)){rememberDraft();hintReadingReview();return;}if(/^(?:请解释|能解释|帮我|我不懂|不理解|请问)|[?？]\s*$/.test(value)){run.chat=true;return converseReadingReview(value);}return submitReadingReview(value);};
+sendAI=async function(){const run=readingReviewCurrent();if(!run)return readingReviewBaseSend();if(busy)return;const value=document.getElementById('aiInput')?.value.trim();if(!value)return;if(run.chat||run.confirmed)return converseReadingReview(value);if(run.answer!==null)return toast('这轮已提交，请先确认记录或点击修订回答');if(/^(?:提示|查看提示|解释一下|帮我理解|看看原句)$/.test(value)){rememberDraft();hintReadingReview();return;}if(!run.materialPractice&&/^(?:请解释|能解释|帮我|我不懂|不理解|请问)|[?？]\s*$/.test(value)){run.chat=true;return converseReadingReview(value);}return submitReadingReview(value);};
 async function converseReadingReview(value){
  const run=readingReviewCurrent();if(!run||busy)return;const key=draftKey();state.drafts[key]='';const input=document.getElementById('aiInput');if(input)input.value='';if(run.answer===null)run.hinted=true;run.chat=true;run.messages||=[];run.messages.push({role:'user',text:value,at:Date.now()});busy=true;render();
  try{await readingSave();if(!desktop||!aiConfigured())append(run.messages,'AI 尚未配置。可以查看已保存的句中提示，或先配置在线 AI 再讨论；你的问题已保留。','离线提示');else await coach(run.messages,value,contextFor());}catch(error){state.drafts[key]=value;append(run.messages,error.message||'本次讨论未完成，问题已保留','请求未完成');}finally{busy=false;await readingSave().catch(showError);render('bottom');}
@@ -138,8 +211,9 @@ async function confirmReadingReview(){
  const early=entry.due>today||(entry.lastReviewed&&new Date(entry.lastReviewed).toDateString()===new Date().toDateString());
  const nextStep=result.pass===true&&!early?Math.min((Number(entry.step)||0)+1,readingReviewIntervals.length-1):result.pass===true?Number(entry.step)||0:0;
  entry.step=nextStep;entry.due=result.pass===true?(early?entry.due:readingReviewDate(readingReviewIntervals[nextStep])):readingReviewDate(1);entry.lastReviewed=Date.now();entry.attempts||=[];
- entry.attempts.push({id:run.id,at:run.answeredAt||Date.now(),confirmedAt:Date.now(),mode:run.mode,scope:run.task.scope,material:run.task.material,prompt:run.task.prompt,answer:run.answer,source:result.source,model:result.model||'',hinted:!!run.answeredHinted,judgmentPass:result.judgmentPass,pass:result.pass,selfChecked:result.source==='用户自检',early,feedback:result.feedback,rubric:result.rubric||[],nextDue:entry.due,messages:JSON.parse(JSON.stringify(run.messages||[])),origin:JSON.parse(JSON.stringify(item.source||{}))});
+ entry.attempts.push({id:run.id,at:run.answeredAt||Date.now(),confirmedAt:Date.now(),mode:run.mode,scope:run.task.scope,material:run.task.material,prompt:run.task.prompt,answer:run.answer,source:result.source,model:result.model||'',hinted:!!run.answeredHinted,judgmentPass:result.judgmentPass,pass:result.pass,selfChecked:result.source==='用户自检',early,feedback:result.feedback,rubric:result.rubric||[],nextDue:entry.due,messages:JSON.parse(JSON.stringify(run.messages||[])),origin:JSON.parse(JSON.stringify(item.source||{})),...(run.materialPractice?{materialPracticeId:run.materialPractice.id,materialKey:run.materialPractice.materialKey,materialSentenceIndex:run.materialPractice.index,groupItemIds:[...(run.task.groupItemIds||[])],targets:JSON.parse(JSON.stringify(run.task.targets||[]))}:{})});
+ if(run.materialPractice){const queue=run.materialPractice;queue.completed||=[];if(!queue.completed.some(row=>row.index===queue.index))queue.completed.push({index:queue.index,runId:run.id,itemId:run.itemId,groupItemIds:[...(run.task.groupItemIds||[])],mode:run.mode,pass:result.pass,hinted:!!run.answeredHinted,status:result.status,at:Date.now()});}
  run.confirmed=true;run.confirmedAt=Date.now();run.chat=true;item.updatedAt=Date.now();await readingSave(item);render();toast(result.pass===true?'本次限定任务记录已保存，下一次 '+entry.due:result.source==='用户自检'?'用户自检记录已保存，明天再练；未判定通过':'训练记录已保存，明天再练');
 }
-function readingReviewHistory(id){const item=readingItem(id);if(!item)return;if(readingReviewHiddenSentence(item)){readingMarkHelp(item);readingSave().catch(showError);}const attempts=readingReviewFor(item).attempts||[];openModal('句子记忆记录',`<p class="sub">${esc(readingReviewSource(item))} · 仅记录语境复习，不改变课程掌握度。</p>${attempts.slice().reverse().slice(0,20).map(attempt=>`<section class="card"><strong>${new Date(attempt.at).toLocaleString('zh-CN')} · ${esc(attempt.scope)}</strong><p class="sub space">${esc(attempt.source)} · ${attempt.source==='用户自检'?'用户自检，未判定通过':attempt.hinted?'有帮助的训练':attempt.pass?'完成本次限定任务':'尚未完成'}${attempt.early?' · 提前练习':''}</p><details><summary>回答与反馈</summary><div class="sub space">${esc(attempt.material)}</div><pre class="pre space">${esc(attempt.answer)}</pre><div class="sub space">${esc(attempt.feedback)}</div></details></section>`).join('')||'<p>暂时没有确认的句子复习记录。</p>'}${btn('关闭','closeModal()')}`);}
-['showAllReadingReviews','startReadingReview','replaceReadingReview','startNextReadingReview','resumeReadingReview','pauseReadingReview','setReadingReviewMode','hintReadingReview','readingReviewConversation','retryReadingReviewGrade','reviseReadingReview','confirmReadingReview','readingReviewHistory','readingPausedReviews','resumePausedReadingReview'].forEach(name=>actions.add(name));
+function readingReviewHistory(id){const item=readingItem(id);if(!item)return;if(readingReviewHiddenSentence(item)){readingMarkHelp(item);readingSave().catch(showError);}const attempts=readingReviewFor(item).attempts||[];openModal('句子记忆记录',`<p class="sub">${esc(readingReviewSource(item))} · 仅记录语境复习，不改变课程掌握度。</p>${attempts.slice().reverse().slice(0,20).map(attempt=>`<section class="card"><strong>${new Date(attempt.at).toLocaleString('zh-CN')} · ${esc(attempt.scope)}</strong><p class="sub space">${esc(attempt.source)} · ${attempt.source==='用户自检'?'用户自检，未判定通过':attempt.hinted?'有帮助的训练':attempt.pass?'完成本次限定任务':'尚未完成'}${attempt.early?' · 提前练习':''}${attempt.groupItemIds?' · 本篇同句 '+attempt.groupItemIds.length+' 个标记合并记录':''}</p><details><summary>回答与反馈</summary><div class="sub space">${esc(attempt.material)}</div><pre class="pre space">${esc(attempt.answer)}</pre><div class="sub space">${esc(attempt.feedback)}</div>${attempt.targets?.length?`<p class="tiny space">本句核对范围：${esc(attempt.targets.map(target=>'第'+target.number+'空：'+target.answer).join('；'))}</p>`:''}</details></section>`).join('')||'<p>暂时没有确认的句子复习记录。</p>'}${btn('关闭','closeModal()')}`);}
+['showAllReadingReviews','startReadingReview','replaceReadingReview','startNextReadingReview','resumeReadingReview','pauseReadingReview','setReadingReviewMode','hintReadingReview','readingReviewConversation','retryReadingReviewGrade','reviseReadingReview','confirmReadingReview','readingReviewHistory','readingPausedReviews','resumePausedReadingReview','startReadingMaterialPractice','replaceReadingMaterialPractice','returnFromReadingMaterialPractice'].forEach(name=>actions.add(name));

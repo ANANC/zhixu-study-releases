@@ -75,11 +75,32 @@ function readingValidTerm(term){return !!term&&term.length<=120&&/^\p{Script=Lat
 function readingWords(text){return [...String(text).matchAll(/\p{Script=Latin}+(?:['’-]\p{Script=Latin}+)*/gu)].map(match=>({text:match[0],start:match.index,end:match.index+match[0].length}));}
 function readingMaterialItems(key){return readingData().items.filter(item=>item.status!=='archived'&&item.source?.materialKey===key);}
 function readingMaterial(token){const entry=readingMaterials.get(token);return entry&&entry.root.isConnected&&readingMaterialKey(entry.root.textContent)===entry.key?entry:null;}
-function readingToolbarHTML(entry){
-  const active=readingTapMode?.token===entry.token,count=readingMaterialItems(entry.key).length,last=entry.lastItem&&readingItem(entry.lastItem);
-  return `<div class="reading-material-actions"><button type="button" class="btn small ${active?'primary':''}" data-action="readingToggleTapMode('${entry.token}')" aria-pressed="${active}">${active?'退出点词':'选词标记'}</button>${btn('本篇 '+count+' 处',`readingMaterialOverview('${entry.token}')`,'small')}${btn('补记一句',`readingAddSentence('${entry.token}')`,'small')}</div><p class="reading-material-hint">${active?'点一下不认识的英文词就能保存。短语可长按选中，或用“补记一句”选择。':'长按或拖选英文词、短语，点击“不认识”；也可以开启点词模式。'}</p>${last?`<div class="reading-saved-inline" role="status"><span>已标记 ${esc(last.term)}</span><div class="actions">${btn('添加我的理解',`readingItemModal('${last.id}')`,'small')}${typeof startReadingReview==='function'?btn('练整句',`readingPracticeItem('${last.id}')`,'small'):''}</div></div>`:''}`;
+function readingMaterialGroups(entry){
+  const text=entry.root.textContent,segments=readingSegments(text),groups=new Map();
+  for(const item of readingMaterialItems(entry.key)){
+    const key=readingNormalize(item.sentence);let group=groups.get(key);
+    if(!group){const position=text.indexOf(item.sentence),sentenceIndex=segments.findIndex(segment=>position>=segment.start&&position<segment.end);group={position:position<0?Number.MAX_SAFE_INTEGER:position,index:sentenceIndex<0?null:sentenceIndex+1,items:[]};groups.set(key,group);}
+    // Keep separate records for every expression, including several words in
+    // the same original sentence and the same word in different sentences.
+    group.items.push(item);
+  }
+  return [...groups.values()].sort((a,b)=>a.position-b.position);
 }
-function readingRefreshToolbars(){for(const [token,entry]of readingMaterials){if(!entry.root.isConnected){entry.toolbar?.remove();readingMaterials.delete(token);continue;}if(entry.toolbar?.isConnected)entry.toolbar.innerHTML=readingToolbarHTML(entry);}}
+function readingMarkedChipsHTML(entry,groups){
+  const count=groups.reduce((total,group)=>total+group.items.length,0);
+  if(!count)return '<p class="reading-mark-empty">本篇的陌生表达会全部显示在这里，点击各词可补充理解和练句子。</p>';
+  return `<details class="reading-marked-list" data-reading-marks="${entry.token}" ${entry.marksOpen!==false?'open':''}><summary><span>全部 ${count} 处标记 · ${groups.length} 句原文</span><span class="reading-marks-toggle" aria-hidden="true">展开 / 收起</span></summary><div class="reading-mark-groups" role="group" aria-label="本篇全部陌生表达">${groups.map(group=>`<div class="reading-mark-group"><span class="reading-mark-group-label">${group.index?'第 '+group.index+' 句':'原文句子'} · ${group.items.length} 处</span><div class="reading-mark-chips">${group.items.map(item=>{const label=(group.index?'第 '+group.index+' 句，':'')+'“'+item.term+'”，查看原句、补充理解或练整句';return `<button type="button" class="reading-mark-chip ${item.id===entry.lastItem?'recent':''}" data-action="readingItemModal('${item.id}')" aria-label="${esc(label)}" title="${esc(label)}">${esc(item.term)}${item.myMeaning||item.myUnderstanding?'<span class="reading-chip-written" aria-label="已补充理解">✓</span>':''}</button>`;}).join('')}</div></div>`).join('')}</div><p class="reading-marks-help">点击任意表达查看原句与理解，标记较多时可上下滚动查看全部。</p></details>`;
+}
+function readingToolbarHTML(entry){
+  const active=readingTapMode?.token===entry.token,groups=readingMaterialGroups(entry),count=groups.reduce((total,group)=>total+group.items.length,0);
+  return `<div class="reading-material-actions"><button type="button" class="btn small ${active?'primary':''}" data-action="readingToggleTapMode('${entry.token}')" aria-pressed="${active}">${active?'退出点词':'选词标记'}</button>${btn('本篇 '+count+' 处',`readingMaterialOverview('${entry.token}')`,'small')}${btn('补记一句',`readingAddSentence('${entry.token}')`,'small')}${btn('正文翻译',`readingOpenSupport('${entry.token}','translation')`,'small')}${btn('长句拆解',`readingOpenSupport('${entry.token}','sentence')`,'small')}${btn('本篇句子练习',`startReadingMaterialPractice('${entry.token}')`,'small')}</div><p class="reading-material-hint">${active?'点一下不认识的英文词就能保存。短语可长按选中，或用“补记一句”选择。':'长按或拖选英文词、短语，点击“不认识”；也可以开启点词模式。'}</p>${readingMarkedChipsHTML(entry,groups)}`;
+}
+function readingUpdateToolbar(entry){
+  if(!entry.toolbar?.isConnected)return;const html=readingToolbarHTML(entry);if(entry.toolbarHTML===html)return;
+  const list=entry.toolbar.querySelector('.reading-mark-groups'),scrollTop=list?.scrollTop||0;entry.toolbar.innerHTML=html;entry.toolbarHTML=html;
+  const next=entry.toolbar.querySelector('.reading-mark-groups');if(next)next.scrollTop=scrollTop;
+}
+function readingRefreshToolbars(){for(const [token,entry]of readingMaterials){if(!entry.root.isConnected){entry.toolbar?.remove();readingMaterials.delete(token);continue;}readingUpdateToolbar(entry);}}
 function readingInstallToolbar(root){
   if(readingWords(root.textContent).length<2)return;
   // A task's passage owns its toolbar. Its separate question still supports
@@ -88,8 +109,8 @@ function readingInstallToolbar(root){
   if(passage&&passage!==root&&readingWords(passage.textContent).length>=2)return;
   let entry=readingMaterials.get(root.dataset.readingRoot);
   if(!entry||entry.root!==root){const token='read-'+crypto.randomUUID();entry={token,root,key:readingMaterialKey(root.textContent)};root.dataset.readingRoot=token;readingMaterials.set(token,entry);}
-  if(!entry.toolbar?.isConnected){const toolbar=document.createElement('div');toolbar.className='reading-material-toolbar';toolbar.setAttribute('role','group');toolbar.setAttribute('aria-label','阅读选词与原句学习');entry.toolbar=toolbar;const host=root.parentElement?.classList.contains('web-material-fold')?root.parentElement:root;host.before(toolbar);}
-  entry.toolbar.innerHTML=readingToolbarHTML(entry);
+  if(!entry.toolbar?.isConnected){const toolbar=document.createElement('div');toolbar.className='reading-material-toolbar';toolbar.setAttribute('role','group');toolbar.setAttribute('aria-label','阅读选词与原句学习');entry.toolbar=toolbar;entry.toolbarHTML=null;const host=root.parentElement?.classList.contains('web-material-fold')?root.parentElement:root;host.before(toolbar);}
+  readingUpdateToolbar(entry);
 }
 function readingLeaveTapMode(paint=true){
   const old=readingTapMode;readingTapMode=null;
@@ -118,7 +139,8 @@ function readingMaterialOverview(token){
   const entry=readingMaterial(token);if(!entry)return toast('请回到当前阅读材料后查看');
   const items=readingMaterialItems(entry.key),summary=typeof readingDocumentSummary==='function'?readingDocumentSummary(entry.root):null;
   const overview=summary?`<div class="reading-document-counts"><span>${summary.totalSentences||0} 句原文</span><span>${summary.markedSentences||0} 句有陌生表达</span><span>${summary.writtenWordUnderstandings||0} 处词义理解</span><span>${summary.writtenSentenceUnderstandings||0} 句已有自己的理解</span><span>${summary.submittedReadingTasks?.length||0} 条阅读作答记录</span></div>`:'';
-  openModal('这篇材料的阅读标记',`<div class="reading-item-detail"><p class="sub">已标记 ${items.length} 个陌生表达。这里展示你的困难线索；不能据此计算全文理解率。</p>${overview}${items.length?items.map(item=>`<article class="reading-list-item"><p class="reading-sentence">${readingSentenceHTML(item)}</p><p class="tiny space">${esc(item.term)} · ${item.myMeaning||item.myUnderstanding?'已补充自己的理解':'理解待补充'}</p><div class="actions space">${btn('补充我的理解',`readingItemModal('${item.id}')`,'small')}${typeof startReadingReview==='function'?btn('练整句',`readingPracticeItem('${item.id}')`,'small'):''}</div></article>`).join(''):'<p class="space">还没有标记。回到原文，点击“选词标记”后点一个不认识的词，或长按选中短语。</p>'}</div>`);
+  if(typeof readingRememberMaterial==='function')readingRememberMaterial(entry);
+  openModal('这篇材料的阅读标记',`<div class="reading-item-detail" data-reading-overview="${entry.token}"><p class="sub">已标记 ${items.length} 个陌生表达。这里展示你的困难线索；不能据此计算全文理解率。</p>${overview}<div class="actions space">${btn('本篇句子练习',`startReadingMaterialPractice('${token}')`,'primary')}${btn('正文翻译',`readingOpenSupport('${token}','translation')`)}${btn('长句拆解',`readingOpenSupport('${token}','sentence')`)}</div>${items.length?items.map(item=>`<article class="reading-list-item"><p class="reading-sentence">${readingSentenceHTML(item)}</p><p class="tiny space">${esc(item.term)} · ${item.myMeaning||item.myUnderstanding?'已补充自己的理解':'理解待补充'}</p><div class="actions space">${btn('补充我的理解',`readingItemModal('${item.id}')`,'small')}${typeof startReadingReview==='function'?btn('练整句',`readingPracticeItem('${item.id}')`,'small'):''}</div></article>`).join(''):'<p class="space">还没有标记。回到原文，点击“选词标记”后点一个不认识的词，或长按选中短语。</p>'}</div>`);
 }
 function readingPickerActive(){return !!readingSentencePicker&&document.querySelector('[data-reading-picker="'+readingSentencePicker.id+'"]');}
 function readingAddSentence(token){
@@ -317,6 +339,7 @@ contextFor=function(course,session){
 const readingBaseRender=render;
 render=function(where){readingHideTool();readingSelection=null;readingPressedSelection=null;readingSelectionLockUntil=0;readingLeaveTapMode(false);readingBaseRender(where);readingData();readingPaintAll();};
 ['markReadingSelection','readingItemModal','saveReadingUnderstanding','explainReadingItem','readingAllModal','readingToggleTapMode','readingTapWord','readingMaterialOverview','readingAddSentence','readingPickWord','readingResetPickedWords','readingSavePickedSentence','readingPracticeItem'].forEach(name=>actions.add(name));
+document.addEventListener('toggle',event=>{const token=event.target.dataset?.readingMarks;if(!token||!event.target.isConnected)return;const entry=readingMaterial(token);if(entry?.toolbar.contains(event.target))entry.marksOpen=event.target.open;},true);
 document.addEventListener('change',event=>{
   if(event.target.id!=='reading-sentence-choice'||!readingPickerActive())return;const index=Number(event.target.value),picker=readingSentencePicker;if(!Number.isInteger(index)||!picker.sentences[index])return;
   const meaning=document.getElementById('reading-meaning'),understanding=document.getElementById('reading-understanding');picker.drafts[picker.index]={myMeaning:meaning.value,myUnderstanding:understanding.value};picker.index=index;

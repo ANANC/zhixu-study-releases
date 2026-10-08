@@ -3,7 +3,7 @@ const desktop=window.study;
 let codexState={available:false,loggedIn:false,message:'尚未检查本机 Codex'};
 function isCodex(){return connection.ai.provider==='codex';}
 function aiLabel(){return isCodex()?(codexState.loggedIn?'AI：本机 Codex 账号':'Codex 等待登录'):(connection.ai.baseUrl?'AI：'+connection.ai.model:'AI 未配置 · 可离线学习');}
-let connection={ai:{baseUrl:'',model:'',jsonMode:true},youdao:{folderId:'',autoSync:false},updates:{owner:'',repo:''},reminders:{enabled:false,time:'20:30',startup:false}},syncMeta={notes:{}},appVersion='1.1.3',cliInstalled=false,busy=false,requestId='',diskState='正在加载',writeChain=Promise.resolve(),booted=false,updateState={},saveTimer;
+let connection={ai:{baseUrl:'',model:'',jsonMode:true},youdao:{folderId:'',autoSync:false},updates:{owner:'',repo:''},reminders:{enabled:false,time:'20:30',startup:false}},syncMeta={notes:{}},appVersion='1.1.4',cliInstalled=false,busy=false,requestId='',diskState='正在加载',writeChain=Promise.resolve(),booted=false,updateState={},saveTimer;
 const original={render,save,defaults,todayPage,coursesPage,assignmentPage,summaryPage,confirmSummary,saveWeekly,saveOutline,resetData,buildPlan,goto,generalReply};
 courses.vector.hwCriteria[1]='阈值使用当前任务半角的余弦，边界是否包含有明确说明';
 courses.vector.homework.push({prompt:'新任务：用 JavaScript 或你熟悉的语言实现 60° 半视野判断。提交完整代码、归一化与重合处理，以及 0°、60°、90°、180° 和重合目标的实际输入输出。',answers:[],executionRequired:true});
