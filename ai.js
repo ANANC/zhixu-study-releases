@@ -28,9 +28,18 @@
     try { return JSON.parse(new TextDecoder().decode(content)); } catch { throw Error('AI 服务返回的数据无法解析，请稍后重试'); }
   }
   function secretName(id) { if (!/^[\w-]{1,80}$/.test(id)) throw Error('AI 配置 ID 无效'); return 'aiKey:' + id; }
+  const canonicalURL = baseURL;
+  function hasKeyFor(store, profile) {
+    if (profile?.provider !== 'api' || !Object.hasOwn(store.data.credentialBindings || {}, profile.id)) return false;
+    try { if (store.data.credentialBindings[profile.id]?.baseUrl !== canonicalURL(profile.baseUrl)) return false; } catch { return false; }
+    return !!store.data.secrets[secretName(profile.id)] || (profile.id === 'api-legacy' && !!store.data.secrets.aiKey);
+  }
   async function keyFor(store, profile) {
-    const name = secretName(profile.id);
-    return store.data.secrets[name] ? store.secret(name) : profile.id === 'api-legacy' ? store.secret('aiKey') : '';
+    const snapshot = {...profile};
+    if (!hasKeyFor(store, snapshot)) return '';
+    const name = store.data.secrets[secretName(snapshot.id)] ? secretName(snapshot.id) : 'aiKey';
+    const value = await store.secret(name, {id: snapshot.id, baseUrl: canonicalURL(snapshot.baseUrl)});
+    return hasKeyFor(store, snapshot) ? value : '';
   }
   function activate(store, id) {
     const profile = store.data.config.aiProfiles.find(value => value.id === id);
@@ -50,17 +59,22 @@
   function validate(input) {
     if (!input || !/^[\w-]{1,80}$/.test(input.id) || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 40 || input.provider !== 'api') throw Error('AI 配置格式无效');
     if (typeof input.model !== 'string' || input.model.length > 200) throw Error('模型配置无效');
-    if (input.baseUrl) baseURL(input.baseUrl);
-    return {id: input.id, name: input.name.trim(), provider: 'api', baseUrl: String(input.baseUrl || '').trim(), model: input.model.trim(), codexModel: '', jsonMode: input.jsonMode !== false, ...(input.id === 'deepseek' ? {thinking: 'disabled'} : {})};
+    return {id: input.id, name: input.name.trim(), provider: 'api', baseUrl: input.baseUrl ? canonicalURL(input.baseUrl) : '', model: input.model.trim(), codexModel: '', jsonMode: input.jsonMode !== false, ...(input.id === 'deepseek' ? {thinking: 'disabled'} : {})};
   }
   async function save(store, input) {
     await store.init();
     const current = store.data.config.aiProfiles.find(profile => profile.id === input?.id);
     if (!current) throw Error('AI 配置不存在');
-    const next = validate(input), changedURL = current.baseUrl !== next.baseUrl;
-    if (changedURL && await keyFor(store,current) && !input.apiKey) throw Error('接口地址改变时请重新填写对应密钥，或新建配置');
+    const next = validate(input);
+    let priorURL = current.baseUrl || ''; try { if (priorURL) priorURL = canonicalURL(priorURL); } catch {}
+    const changedURL = priorURL !== next.baseUrl;
+    if (changedURL && hasKeyFor(store,current) && !input.apiKey) throw Error('接口地址改变时请重新填写对应密钥，或新建配置');
     if (!changedURL && next.model && current.models?.length && !current.models.some(model => model.id === next.model)) throw Error('请从当前服务的模型列表中选择');
-    if (input.apiKey) await store.setSecret(secretName(input.id),String(input.apiKey));
+    if (input.apiKey) {
+      if (!next.baseUrl) throw Error('请先填写此 API 服务的接口地址');
+      await store.setSecret(secretName(input.id),String(input.apiKey));
+      store.data.credentialBindings = {...store.data.credentialBindings, [input.id]: {baseUrl: canonicalURL(next.baseUrl)}};
+    }
     Object.assign(current,next);
     if (changedURL) { current.models=[]; current.modelsAt=null; current.model=''; }
     if (current.id === store.data.config.activeAI) activate(store,current.id);
@@ -78,10 +92,10 @@
     await store.init();
     if (profile?.provider !== 'api') throw Error('请在桌面版获取 Codex 模型；网页版使用在线服务');
     if (!profile.baseUrl) throw Error('请先保存接口地址和密钥，再获取模型');
-    const key = await keyFor(store,profile), controller = new AbortController(), timer = setTimeout(()=>controller.abort(),30000);
+    const snapshot = {...profile}, base = canonicalURL(snapshot.baseUrl), key = await keyFor(store,snapshot), controller = new AbortController(), timer = setTimeout(()=>controller.abort(),30000);
     let catalog;
     try {
-      const response = await fetch(baseURL(profile.baseUrl)+'/models',{redirect:'error',signal:controller.signal,headers:key?{Authorization:'Bearer '+key}:{}});
+      const response = await fetch(base+'/models',{redirect:'error',signal:controller.signal,headers:key?{Authorization:'Bearer '+key}:{}});
       if (!response.ok) throw Error('模型列表读取失败（HTTP '+response.status+'），请检查密钥与服务权限');
       const result = await responseJSON(response);
       if (!Array.isArray(result.data)) throw Error('服务没有返回可用的模型列表');
@@ -92,6 +106,7 @@
       if (error instanceof TypeError) throw Error('无法连接此 AI 服务；请检查网络和接口地址，服务需要允许浏览器跨域访问');
       throw error;
     } finally { clearTimeout(timer); }
+    if (store.data.config.aiProfiles.find(item=>item.id===snapshot.id) !== profile || canonicalURL(profile.baseUrl) !== base) throw Error('AI 服务配置已变化，请重新获取模型列表');
     profile.models = catalog; profile.modelsAt = Date.now();
     if (!profile.model || !catalog.some(model=>model.id===profile.model)) profile.model=(catalog.find(model=>model.id==='deepseek-flash')||catalog.find(model=>model.id==='deepseek-chat')||catalog[0]).id;
     if (store.data.config.activeAI === profile.id) activate(store,profile.id);
@@ -137,7 +152,7 @@
     }
     models(profile) { return models(this.store,profile); }
   }
-  window.WebProfiles={normalize,activate,secretName,keyFor,validate,save,create,models,clearKey};
+  window.WebProfiles={normalize,activate,secretName,keyFor,hasKeyFor,canonicalURL,validate,save,create,models,clearKey};
   window.BrowserAI=BrowserAI;
   window.WebAIHelpers={baseURL,parseJSON};
 })();

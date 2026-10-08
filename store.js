@@ -6,7 +6,7 @@
   const MAX_WORKSPACE = 12000000;
   const clone = value => value == null ? value : structuredClone(value);
   const secretName = name => {
-    if (!['aiKey', 'youdaoKey'].includes(name) && !/^aiKey:[\w-]{1,80}$/.test(name)) throw Error('不支持的凭据');
+    if (!['aiKey', 'youdaoKey', 'accountConfigPassword'].includes(name) && !/^aiKey:[\w-]{1,80}$/.test(name)) throw Error('不支持的凭据');
     return name;
   };
   const request = value => new Promise((resolve, reject) => {
@@ -28,7 +28,7 @@
         updates: {owner: 'ANANC', repo: 'zhixu-study-releases'},
         reminders: {enabled: false, time: '20:30', startup: false}
       },
-      secrets: {}, sync: {notes: {}, lastSnapshot: null}
+      secrets: {}, credentialBindings: {}, credentialBindingsVersion: 1, sync: {notes: {}, lastSnapshot: null}
     };
   }
   function workspaceCopy(value) {
@@ -37,10 +37,32 @@
     if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_WORKSPACE) throw Error('学习数据超过 12MB，请先导出备份');
     return clone(value);
   }
-  function publicProfile(profile, secrets) {
+  function canonicalURL(value) {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw Error('AI 接口地址无效');
+    return url.href.replace(/\/$/, '');
+  }
+  function hasKeyFor(profile, data) {
+    if (profile?.provider !== 'api' || !Object.hasOwn(data.credentialBindings || {}, profile.id)) return false;
+    try { if (data.credentialBindings[profile.id]?.baseUrl !== canonicalURL(profile.baseUrl)) return false; } catch { return false; }
+    return !!data.secrets['aiKey:' + profile.id] || (profile.id === 'api-legacy' && !!data.secrets.aiKey);
+  }
+  function unbind(data, name) {
+    const id = name === 'aiKey' ? 'api-legacy' : name.startsWith('aiKey:') ? name.slice(6) : null;
+    if (id && data.credentialBindings) delete data.credentialBindings[id];
+  }
+  function bindingMatches(data, binding) {
+    return !binding || (Object.hasOwn(data.credentialBindings || {}, binding.id) && data.credentialBindings[binding.id]?.baseUrl === binding.baseUrl);
+  }
+  function publicFields(value) {
+    if (Array.isArray(value)) return value.map(publicFields);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !['secrets', 'password', 'accountConfigPassword', 'credentialBindings', 'credentialBindingsVersion', 'apiKey', 'aiKey', 'youdaoKey'].includes(key)).map(([key, item]) => [key, publicFields(item)]));
+  }
+  function publicProfile(profile, data) {
     const fields = ['id', 'name', 'provider', 'baseUrl', 'model', 'codexModel', 'jsonMode', 'thinking', 'models', 'modelsAt'];
-    const copy = Object.fromEntries(fields.filter(key => profile[key] !== undefined).map(key => [key, clone(profile[key])]));
-    copy.hasKey = !!secrets['aiKey:' + profile.id] || (profile.id === 'api-legacy' && !!secrets.aiKey);
+    const copy = Object.fromEntries(fields.filter(key => profile[key] !== undefined).map(key => [key, publicFields(clone(profile[key]))]));
+    copy.hasKey = hasKeyFor(profile, data);
     return copy;
   }
   class BrowserStore {
@@ -95,6 +117,19 @@
       this.data.secrets ||= {};
       this.data.sync ||= {notes: {}, lastSnapshot: null};
       this.data.sync.notes ||= {};
+      let migrated = false;
+      if (!this.data.credentialBindings || typeof this.data.credentialBindings !== 'object' || Array.isArray(this.data.credentialBindings)) { this.data.credentialBindings = {}; migrated = true; }
+      if (Number(this.data.credentialBindingsVersion || 0) < 1) {
+        for (const profile of this.data.config?.aiProfiles || []) {
+          if (profile?.provider !== 'api' || !profile.baseUrl || Object.hasOwn(this.data.credentialBindings, profile.id)) continue;
+          if (!this.data.secrets['aiKey:' + profile.id] && !(profile.id === 'api-legacy' && this.data.secrets.aiKey)) continue;
+          try { this.data.credentialBindings = {...this.data.credentialBindings, [profile.id]: {baseUrl: canonicalURL(profile.baseUrl)}}; } catch {}
+        }
+        // This runs before any account configuration can replace local URLs.
+        // Never let a later incoming profile claim a leftover unbound key.
+        this.data.credentialBindingsVersion = 1; migrated = true;
+      }
+      if (migrated) await this.write(clone(this.data));
       return this;
     }
     enqueue(work) {
@@ -137,32 +172,34 @@
       secretName(name);
       if (typeof value !== 'string' || value.length > 16000) return Promise.reject(Error('凭据格式无效'));
       return this.enqueue(async () => {
-        if (!value) { delete this.data.secrets[name]; return; }
+        if (!value) { unbind(this.data, name); delete this.data.secrets[name]; return; }
         const iv = crypto.getRandomValues(new Uint8Array(12));
         const content = new TextEncoder().encode(value);
         const cipher = await crypto.subtle.encrypt({name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(name)}, this.key, content);
+        unbind(this.data, name);
         this.data.secrets[name] = {version: 1, iv, cipher};
       });
     }
-    secret(name) {
+    secret(name, binding) {
       secretName(name);
       return this.enqueue(async () => {
+        if (!bindingMatches(this.data, binding)) return '';
         const value = this.data.secrets[name];
         if (!value) return '';
         if (value.version !== 1 || !value.iv || !value.cipher) throw Error('此设备无法读取保存的凭据，请重新授权；学习数据已保留');
         try {
           const plain = await crypto.subtle.decrypt({name: 'AES-GCM', iv: value.iv, additionalData: new TextEncoder().encode(name)}, this.key, value.cipher);
-          return new TextDecoder().decode(plain);
+          return bindingMatches(this.data, binding) ? new TextDecoder().decode(plain) : '';
         } catch { throw Error('此设备无法解密保存的凭据，请重新授权；学习数据已保留'); }
       });
     }
     publicConfig() {
       const config = this.data.config;
-      const profiles = (config.aiProfiles || []).map(profile => publicProfile(profile, this.data.secrets));
+      const profiles = (config.aiProfiles || []).map(profile => publicProfile(profile, this.data));
       const active = profiles.find(profile => profile.id === config.activeAI);
       return {
-        activeAI: config.activeAI, ai: active || publicProfile(config.ai || {}, this.data.secrets), aiProfiles: profiles,
-        youdao: clone(config.youdao), updates: clone(config.updates), reminders: clone(config.reminders),
+        activeAI: config.activeAI, ai: active || publicProfile(config.ai || {}, this.data), aiProfiles: profiles,
+        youdao: publicFields(clone(config.youdao)), updates: publicFields(clone(config.updates)), reminders: publicFields(clone(config.reminders)),
         hasAiKey: !!active?.hasKey, hasYoudaoKey: !!this.data.secrets.youdaoKey,
         deviceId: this.data.deviceId, dataPath: this.root
       };
@@ -188,6 +225,7 @@
       if (options.confirm !== true) return Promise.reject(Error('请先确认退出有道授权；此设备学习数据会保留'));
       return this.enqueue(async () => {
         delete this.data.secrets.youdaoKey;
+        delete this.data.secrets.accountConfigPassword;
         this.data.config.youdao = {...this.data.config.youdao, folderId: '', folderName: '', workspaceAutoSync: false};
         this.data.sync = {notes: {}, lastSnapshot: null};
         await this.write(clone(this.data));
